@@ -1,0 +1,3 @@
+weights
+*.out
+__pycache__/
