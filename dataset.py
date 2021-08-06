@@ -15,7 +15,7 @@ class Dataset(object):
         self.lr_transforms = transforms.Compose([
             transforms.ToPILImage(),
             transforms.Lambda(deg.degradation_pipeline),
-            #transforms.Resize((image_size // upscale_factor, image_size // upscale_factor), interpolation=Image.BICUBIC),
+            transforms.Resize((image_size // upscale_factor, image_size // upscale_factor), interpolation=Image.BICUBIC),
             transforms.ToTensor()
         ])
         self.hr_transforms = transforms.Compose([

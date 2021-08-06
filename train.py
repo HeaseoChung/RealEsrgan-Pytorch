@@ -20,6 +20,76 @@ from dataset import Dataset
 
 # 52655
 # BSRNETv2: 8362
+
+
+
+
+
+def psnr_trainer(train_dataloader, eval_dataloader, model, pixel_criterion, psnr_optimizer, epoch, best_psnr, scaler, writer, args):
+        model.train()
+        losses = AverageMeter(name="PSNR Loss", fmt=":.6f")
+        psnr = AverageMeter(name="PSNR", fmt=":.6f")
+        
+        """  트레이닝 Epoch 시작 """
+        for i, (lr, hr) in enumerate(train_dataloader):
+            lr = lr.to(device)
+            hr = hr.to(device)
+
+            psnr_optimizer.zero_grad()
+
+            with amp.autocast():
+                preds = model(lr)
+                loss = pixel_criterion(preds, hr)
+
+            if i == 0:
+                vutils.save_image(lr.detach(), os.path.join(args.outputs_dir, f"LR_{epoch}.jpg"))
+                vutils.save_image(hr.detach(), os.path.join(args.outputs_dir, f"HR_{epoch}.jpg"))
+                vutils.save_image(preds.detach(), os.path.join(args.outputs_dir, f"preds_{epoch}.jpg"))
+            
+            """ Scaler 업데이트 """
+            scaler.scale(loss).backward()
+            scaler.step(psnr_optimizer)
+            scaler.update()
+
+            """ Loss 업데이트 """
+            losses.update(loss.item(), len(lr))
+        
+        """ 1 epoch 마다 텐서보드 업데이트 """
+        writer.add_scalar('L1Loss/train', losses.avg, epoch)
+
+        psnr_scheduler.step()
+
+        """  테스트 Epoch 시작 """
+        model.eval()
+        for i, (lr, hr) in enumerate(eval_dataloader):
+            lr = lr.to(device)
+            hr = hr.to(device)
+            with torch.no_grad():
+                preds = model(lr)
+            psnr.update(calc_psnr(preds, hr), len(lr))
+    
+        """ 1 epoch 마다 텐서보드 업데이트 """
+        writer.add_scalar('psnr/test', psnr.avg, epoch)
+
+        if psnr.avg > best_psnr:
+            best_psnr = psnr.avg
+            torch.save(
+                model.state_dict(), os.path.join(args.outputs_dir, 'best.pth')
+            )
+
+        if epoch % 10 == 0:
+            torch.save(
+                {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': psnr_optimizer.state_dict(),
+                    'loss': loss,
+                    'best_psnr': best_psnr,
+                }, os.path.join(args.outputs_dir, 'epoch_{}.pth'.format(epoch))
+            )
+
+
+
 if __name__ == '__main__':
     """ 로그 설정 """
     logger = logging.getLogger(__name__)
@@ -30,14 +100,15 @@ if __name__ == '__main__':
     parser.add_argument('--train-file', type=str, required=True)
     parser.add_argument('--eval-file', type=str, required=True)
     parser.add_argument('--outputs-dir', type=str, required=True)
-    parser.add_argument('--scale', type=int, default=3)
+    parser.add_argument('--scale', type=int, default=4, required=True)
     parser.add_argument('--psnr-lr', type=float, default=0.0001)
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--num-epochs', type=int, default=10000)
     parser.add_argument('--num-workers', type=int, default=8)
-    parser.add_argument('--patch-size', type=int, default=128)
+    parser.add_argument('--patch-size', type=int, default=256)
     parser.add_argument('--seed', type=int, default=123)
     parser.add_argument('--checkpoint-file', type=str, default='checkpoint-file.pth')
+    parser.add_argument('--cuda', type=int, default=0)
     args = parser.parse_args()
     
     """ weight를 저장 할 경로 설정 """ 
@@ -50,24 +121,24 @@ if __name__ == '__main__':
 
     """ GPU 디바이스 설정 """
     cudnn.benchmark = True
-    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(f'cuda:{args.cuda}' if torch.cuda.is_available() else 'cpu')
     
     """ Torch Seed 설정 """
     torch.manual_seed(args.seed)
 
     """ FUNIE 모델 설정 """
-    model = Generator().to(device)
+    model = Generator(args.scale).to(device)
 
     """ Loss 및 Optimizer 설정 """
     pixel_criterion = nn.L1Loss().to(device)
     psnr_optimizer = torch.optim.Adam(model.parameters(), args.psnr_lr, (0.9, 0.99))
     interval_epoch = math.ceil(args.num_epochs // 8)
     epoch_indices = [interval_epoch, interval_epoch * 2, interval_epoch * 4, interval_epoch * 6]
-    #psnr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(psnr_optimizer, psnr_epoch_indices, 1, 1e-7)
     psnr_scheduler = torch.optim.lr_scheduler.MultiStepLR(psnr_optimizer, milestones=[1000,2000,3000,4000], gamma=0.5)
     scaler = amp.GradScaler()
 
-    total_epoch = args.num_epochs
+    """ PSNR model setup """
+    total_psnr_epoch = args.num_epochs
     start_epoch = 0
     best_psnr = 0
 
@@ -112,68 +183,7 @@ if __name__ == '__main__':
                                 num_workers=args.num_workers,
                                 pin_memory=True
                                 )
-    
-    """ 트레이닝 시작 & 테스트 시작"""
-    for epoch in range(start_epoch, total_epoch):
-        model.train()
-        losses = AverageMeter(name="PSNR Loss", fmt=":.6f")
-        psnr = AverageMeter(name="PSNR", fmt=":.6f")
-        
-        """  트레이닝 Epoch 시작 """
-        for i, (lr, hr) in enumerate(train_dataloader):
-            lr = lr.to(device)
-            hr = hr.to(device)
 
-            psnr_optimizer.zero_grad()
+    for epoch in range(start_epoch, total_psnr_epoch):
+        psnr_trainer(train_dataloader=train_dataloader, eval_dataloader=eval_dataloader, model=model, pixel_criterion=pixel_criterion, psnr_optimizer=psnr_optimizer, epoch=epoch, best_psnr=best_psnr, scaler=scaler, writer=writer, args=args)
 
-            with amp.autocast():
-                preds = model(lr)
-                loss = pixel_criterion(preds, hr)
-
-            if i == 0:
-                vutils.save_image(lr.detach(), os.path.join(args.outputs_dir, f"LR_{epoch}.jpg"))
-                vutils.save_image(hr.detach(), os.path.join(args.outputs_dir, f"HR_{epoch}.jpg"))
-                vutils.save_image(preds.detach(), os.path.join(args.outputs_dir, f"preds_{epoch}.jpg"))
-            
-            """ Scaler 업데이트 """
-            scaler.scale(loss).backward()
-            scaler.step(psnr_optimizer)
-            scaler.update()
-
-            """ Loss 업데이트 """
-            losses.update(loss.item(), len(lr))
-        
-        """ 1 epoch 마다 텐서보드 업데이트 """
-        writer.add_scalar('L1Loss/train', losses.avg, epoch)
-
-        psnr_scheduler.step()
-
-        """  테스트 Epoch 시작 """
-        model.eval()
-
-        for i, (lr, hr) in enumerate(eval_dataloader):
-            lr = lr.to(device)
-            hr = hr.to(device)
-            with torch.no_grad():
-                preds = model(lr)
-            psnr.update(calc_psnr(preds, hr), len(lr))
-    
-        """ 1 epoch 마다 텐서보드 업데이트 """
-        writer.add_scalar('psnr/test', psnr.avg, epoch)
-
-        if psnr.avg > best_psnr:
-            best_psnr = psnr.avg
-            torch.save(
-                model.state_dict(), os.path.join(args.outputs_dir, 'best.pth')
-            )
-
-        if epoch % 10 == 0:
-            torch.save(
-                {
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': psnr_optimizer.state_dict(),
-                    'loss': loss,
-                    'best_psnr': best_psnr,
-                }, os.path.join(args.outputs_dir, 'epoch_{}.pth'.format(epoch))
-            )
