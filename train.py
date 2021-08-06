@@ -14,11 +14,12 @@ from torch import nn
 from torch.cuda import amp
 from torch.utils.tensorboard import SummaryWriter
 
-from models import BSRNet
+from models import BSRNet, BSRNetV2
 from utils import AverageMeter, calc_psnr
 from dataset import Dataset
 
-
+# 52655
+# BSRNETv2: 8362
 if __name__ == '__main__':
     """ 로그 설정 """
     logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     """ weight를 저장 할 경로 설정 """ 
-    args.outputs_dir = os.path.join(args.outputs_dir,  f"FUNIE")
+    args.outputs_dir = os.path.join(args.outputs_dir,  f"BSRGANx{args.scale}")
     if not os.path.exists(args.outputs_dir):
         os.makedirs(args.outputs_dir)
 
@@ -49,13 +50,13 @@ if __name__ == '__main__':
 
     """ GPU 디바이스 설정 """
     cudnn.benchmark = True
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
     
     """ Torch Seed 설정 """
     torch.manual_seed(args.seed)
 
     """ FUNIE 모델 설정 """
-    model = BSRNet().to(device)
+    model = BSRNetV2().to(device)
 
     """ Loss 및 Optimizer 설정 """
     pixel_criterion = nn.L1Loss().to(device)

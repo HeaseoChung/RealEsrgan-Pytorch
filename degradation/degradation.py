@@ -1,4 +1,3 @@
-from numpy.lib.type_check import imag
 import cv2
 import math
 import numpy as np
@@ -10,7 +9,6 @@ from PIL import Image
 from scipy import special
 from scipy import ndimage
 from scipy.stats import multivariate_normal
-from torchvision.transforms.functional_tensor import rgb_to_grayscale
 
 class Degradation():
     def __init__(self):
@@ -37,6 +35,45 @@ class Degradation():
         self.pulse_tensor = torch.zeros(21, 21).float()  # convolving with pulse tensor brings no blurry effect
         self.pulse_tensor[10, 10] = 1
 
+    def degradation_pipeline(self, image, sf=2):
+        """ Generate kernels (used in the first degradation) """
+        image = self.generate_kernel1(image)
+        image = self.generate_sinc(image)
+        image = self.random_downsampling(image, sf)
+        image = self.random_poisson_noise(image)
+        image = self.random_gaussian_noise(image)
+        image = self.random_jpeg_noise(image)
+        
+        """ Generate kernels (used in the second degradation) """
+        image = self.generate_kernel2(image)
+        image = self.random_downsampling(image, sf)
+        image = self.random_poisson_noise(image)
+        image = self.random_gaussian_noise(image)
+        image = self.random_jpeg_noise(image)
+        image = self.generate_sinc(image)
+        return Image.fromarray(image.clip(0, 255).astype(np.uint8))
+
+    def random_poisson_noise(self, img, sigma_s="RAN", sigma_c="RAN"):
+        min_log = np.log([0.0001])
+        if sigma_s == "RAN":
+            sigma_s = min_log + np.random.rand(1) * (np.log([0.16]) - min_log)
+            sigma_s = np.exp(sigma_s)
+            self.sigma_s = sigma_s
+        if sigma_c == "RAN":
+            sigma_c = min_log + np.random.rand(1) * (np.log([0.06]) - min_log)
+            sigma_c = np.exp(sigma_c)
+            self.sigma_c = sigma_c
+
+        sigma_total = np.sqrt(sigma_s * img + sigma_c)
+        """
+        noisy_img = img + \
+            np.random.normal(0.0, 1.0, img.shape) * (sigma_s * img) + \
+            np.random.normal(0.0, 1.0, img.shape) * sigma_c
+        """
+        noisy_img = img + sigma_total * np.random.randn(img.shape[0], img.shape[1])
+        noisy_img = np.clip(noisy_img, 0, 255)
+        return noisy_img
+
     def random_gaussian_noise(self, image):
         noise_level = random.randint(1, 25)
         image = image + np.random.normal(0, noise_level, image.shape)
@@ -54,22 +91,6 @@ class Degradation():
         degrade_function = lambda x: trans.augment_image(x)
         image = degrade_function(image.astype(np.uint8))
         return image.clip(min=0, max=255)
-
-    def degradation_pipeline(self, image, sf=2):
-        """ Generate kernels (used in the first degradation) """
-        image = self.generate_kernel1(image)
-        image = self.generate_sinc(image)
-        image = self.random_downsampling(image, sf)
-        image = self.random_gaussian_noise(image)
-        image = self.random_jpeg_noise(image)
-
-        # """ Generate kernels (used in the second degradation) """
-        image = self.generate_kernel2(image)
-        image = self.random_downsampling(image, sf)
-        image = self.random_gaussian_noise(image)
-        image = self.random_jpeg_noise(image)
-        image = self.generate_sinc(image)
-        return Image.fromarray(image.clip(0, 255).astype(np.uint8))
 
     def random_downsampling(self, image, sf):
         h, w, c = image.shape
@@ -89,7 +110,6 @@ class Degradation():
 
         image = cv2.resize(image, (w,h), interpolation=flags)
         return image.clip(0,255)
-
 
     def generate_kernel1(self, image):
         kernel_size = random.choice(self.kernel_range)
@@ -553,359 +573,6 @@ class Degradation():
             pad_size = (pad_to - kernel_size) // 2
             kernel = np.pad(kernel, ((pad_size, pad_size), (pad_size, pad_size)))
         return kernel
-
-
-    # ------------------------------------------------------------- #
-    # --------------------------- noise --------------------------- #
-    # ------------------------------------------------------------- #
-
-    # ----------------------- Gaussian Noise ----------------------- #
-
-
-    def generate_gaussian_noise(self, img, sigma=10, gray_noise=False):
-        """Generate Gaussian noise.
-
-        Args:
-            img (Numpy array): Input image, shape (h, w, c), range [0, 1], float32.
-            sigma (float): Noise scale (measured in range 255). Default: 10.
-
-        Returns:
-            (Numpy array): Returned noisy image, shape (h, w, c), range[0, 1],
-                float32.
-        """
-        if gray_noise:
-            noise = np.float32(np.random.randn(*(img.shape[0:2]))) * sigma / 255.
-            noise = np.expand_dims(noise, axis=2).repeat(3, axis=2)
-        else:
-            noise = np.float32(np.random.randn(*(img.shape))) * sigma / 255.
-        return noise
-
-
-    def add_gaussian_noise(self, img, sigma=10, clip=True, rounds=False, gray_noise=False):
-        """Add Gaussian noise.
-
-        Args:
-            img (Numpy array): Input image, shape (h, w, c), range [0, 1], float32.
-            sigma (float): Noise scale (measured in range 255). Default: 10.
-
-        Returns:
-            (Numpy array): Returned noisy image, shape (h, w, c), range[0, 1],
-                float32.
-        """
-        noise = self.generate_gaussian_noise(img, sigma, gray_noise)
-        out = img + noise
-        if clip and rounds:
-            out = np.clip((out * 255.0).round(), 0, 255) / 255.
-        elif clip:
-            out = np.clip(out, 0, 1)
-        elif rounds:
-            out = (out * 255.0).round() / 255.
-        return out
-
-
-    def generate_gaussian_noise_pt(self, img, sigma=10, gray_noise=0):
-        """Add Gaussian noise (PyTorch version).
-
-        Args:
-            img (Tensor): Shape (b, c, h, w), range[0, 1], float32.
-            scale (float | Tensor): Noise scale. Default: 1.0.
-
-        Returns:
-            (Tensor): Returned noisy image, shape (b, c, h, w), range[0, 1],
-                float32.
-        """
-        b, c, h, w = img.size()
-        if not isinstance(sigma, (float, int)):
-            sigma = sigma.view(img.size(0), 1, 1, 1)
-        if isinstance(gray_noise, (float, int)):
-            cal_gray_noise = gray_noise > 0
-        else:
-            gray_noise = gray_noise.view(b, 1, 1, 1)
-            cal_gray_noise = torch.sum(gray_noise) > 0
-
-        if cal_gray_noise:
-            noise_gray = torch.randn(*img.size()[2:4], dtype=img.dtype, device=img.device) * sigma / 255.
-            noise_gray = noise_gray.view(b, 1, h, w)
-
-        # alway calculate color noise
-        noise = torch.randn(*img.size(), dtype=img.dtype, device=img.device) * sigma / 255.
-
-        if cal_gray_noise:
-            noise = noise * (1 - gray_noise) + noise_gray * gray_noise
-        return noise
-
-
-    def add_gaussian_noise_pt(self, img, sigma=10, gray_noise=0, clip=True, rounds=False):
-        """Add Gaussian noise (PyTorch version).
-
-        Args:
-            img (Tensor): Shape (b, c, h, w), range[0, 1], float32.
-            scale (float | Tensor): Noise scale. Default: 1.0.
-
-        Returns:
-            (Tensor): Returned noisy image, shape (b, c, h, w), range[0, 1],
-                float32.
-        """
-        noise = self.generate_gaussian_noise_pt(img, sigma, gray_noise)
-        out = img + noise
-        if clip and rounds:
-            out = torch.clamp((out * 255.0).round(), 0, 255) / 255.
-        elif clip:
-            out = torch.clamp(out, 0, 1)
-        elif rounds:
-            out = (out * 255.0).round() / 255.
-        return out
-
-
-    # ----------------------- Random Gaussian Noise ----------------------- #
-    def random_generate_gaussian_noise(self, img, sigma_range=(0, 10), gray_prob=0):
-        sigma = np.random.uniform(sigma_range[0], sigma_range[1])
-        if np.random.uniform() < gray_prob:
-            gray_noise = True
-        else:
-            gray_noise = False
-        return self.generate_gaussian_noise(img, sigma, gray_noise)
-
-
-    def random_add_gaussian_noise(self, img, sigma_range=(0, 1.0), gray_prob=0, clip=True, rounds=False):
-        noise = self.random_generate_gaussian_noise(img, sigma_range, gray_prob)
-        out = img + noise
-        if clip and rounds:
-            out = np.clip((out * 255.0).round(), 0, 255) / 255.
-        elif clip:
-            out = np.clip(out, 0, 1)
-        elif rounds:
-            out = (out * 255.0).round() / 255.
-        return out
-
-
-    def random_generate_gaussian_noise_pt(self, img, sigma_range=(0, 10), gray_prob=0):
-        sigma = torch.rand(
-            img.size(0), dtype=img.dtype, device=img.device) * (sigma_range[1] - sigma_range[0]) + sigma_range[0]
-        gray_noise = torch.rand(img.size(0), dtype=img.dtype, device=img.device)
-        gray_noise = (gray_noise < gray_prob).float()
-        return self.generate_gaussian_noise_pt(img, sigma, gray_noise)
-
-
-    def random_add_gaussian_noise_pt(self, img, sigma_range=(0, 1.0), gray_prob=0, clip=True, rounds=False):
-        noise = self.random_generate_gaussian_noise_pt(img, sigma_range, gray_prob)
-        out = img + noise
-        if clip and rounds:
-            out = torch.clamp((out * 255.0).round(), 0, 255) / 255.
-        elif clip:
-            out = torch.clamp(out, 0, 1)
-        elif rounds:
-            out = (out * 255.0).round() / 255.
-        return out
-
-
-    # ----------------------- Poisson (Shot) Noise ----------------------- #
-
-
-    def generate_poisson_noise(self, img, scale=1.0, gray_noise=False):
-        """Generate poisson noise.
-
-        Ref: https://github.com/scikit-image/scikit-image/blob/main/skimage/util/noise.py#L37-L219
-
-        Args:
-            img (Numpy array): Input image, shape (h, w, c), range [0, 1], float32.
-            scale (float): Noise scale. Default: 1.0.
-            gray_noise (bool): Whether generate gray noise. Default: False.
-
-        Returns:
-            (Numpy array): Returned noisy image, shape (h, w, c), range[0, 1],
-                float32.
-        """
-        if gray_noise:
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # round and clip image for counting vals correctly
-        img = np.clip((img * 255.0).round(), 0, 255) / 255.
-        vals = len(np.unique(img))
-        vals = 2**np.ceil(np.log2(vals))
-        out = np.float32(np.random.poisson(img * vals) / float(vals))
-        noise = out - img
-        if gray_noise:
-            noise = np.repeat(noise[:, :, np.newaxis], 3, axis=2)
-        return noise * scale
-
-
-    def add_poisson_noise(self, img, scale=1.0, clip=True, rounds=False, gray_noise=False):
-        """Add poisson noise.
-
-        Args:
-            img (Numpy array): Input image, shape (h, w, c), range [0, 1], float32.
-            scale (float): Noise scale. Default: 1.0.
-            gray_noise (bool): Whether generate gray noise. Default: False.
-
-        Returns:
-            (Numpy array): Returned noisy image, shape (h, w, c), range[0, 1],
-                float32.
-        """
-        noise = self.generate_poisson_noise(img, scale, gray_noise)
-        out = img + noise
-        if clip and rounds:
-            out = np.clip((out * 255.0).round(), 0, 255) / 255.
-        elif clip:
-            out = np.clip(out, 0, 1)
-        elif rounds:
-            out = (out * 255.0).round() / 255.
-        return out
-
-
-    def generate_poisson_noise_pt(self, img, scale=1.0, gray_noise=0):
-        """Generate a batch of poisson noise (PyTorch version)
-
-        Args:
-            img (Tensor): Input image, shape (b, c, h, w), range [0, 1], float32.
-            scale (float | Tensor): Noise scale. Number or Tensor with shape (b).
-                Default: 1.0.
-            gray_noise (float | Tensor): 0-1 number or Tensor with shape (b).
-                0 for False, 1 for True. Default: 0.
-
-        Returns:
-            (Tensor): Returned noisy image, shape (b, c, h, w), range[0, 1],
-                float32.
-        """
-        b, c, h, w = img.size()
-        if isinstance(gray_noise, (float, int)):
-            cal_gray_noise = gray_noise > 0
-        else:
-            gray_noise = gray_noise.view(b, 1, 1, 1)
-            cal_gray_noise = torch.sum(gray_noise) > 0
-        if cal_gray_noise:
-            img_gray = rgb_to_grayscale(img, num_output_channels=1)
-            # round and clip image for counting vals correctly
-            img_gray = torch.clamp((img_gray * 255.0).round(), 0, 255) / 255.
-            # use for-loop to get the unique values for each sample
-            vals_list = [len(torch.unique(img_gray[i, :, :, :])) for i in range(b)]
-            vals_list = [2**np.ceil(np.log2(vals)) for vals in vals_list]
-            vals = img_gray.new_tensor(vals_list).view(b, 1, 1, 1)
-            out = torch.poisson(img_gray * vals) / vals
-            noise_gray = out - img_gray
-            noise_gray = noise_gray.expand(b, 3, h, w)
-
-        # alway calculate color noise
-        # round and clip image for counting vals correctly
-        img = torch.clamp((img * 255.0).round(), 0, 255) / 255.
-        # use for-loop to get the unique values for each sample
-        vals_list = [len(torch.unique(img[i, :, :, :])) for i in range(b)]
-        vals_list = [2**np.ceil(np.log2(vals)) for vals in vals_list]
-        vals = img.new_tensor(vals_list).view(b, 1, 1, 1)
-        out = torch.poisson(img * vals) / vals
-        noise = out - img
-        if cal_gray_noise:
-            noise = noise * (1 - gray_noise) + noise_gray * gray_noise
-        if not isinstance(scale, (float, int)):
-            scale = scale.view(b, 1, 1, 1)
-        return noise * scale
-
-
-    def add_poisson_noise_pt(self, img, scale=1.0, clip=True, rounds=False, gray_noise=0):
-        """Add poisson noise to a batch of images (PyTorch version).
-
-        Args:
-            img (Tensor): Input image, shape (b, c, h, w), range [0, 1], float32.
-            scale (float | Tensor): Noise scale. Number or Tensor with shape (b).
-                Default: 1.0.
-            gray_noise (float | Tensor): 0-1 number or Tensor with shape (b).
-                0 for False, 1 for True. Default: 0.
-
-        Returns:
-            (Tensor): Returned noisy image, shape (b, c, h, w), range[0, 1],
-                float32.
-        """
-        noise = self.generate_poisson_noise_pt(img, scale, gray_noise)
-        out = img + noise
-        if clip and rounds:
-            out = torch.clamp((out * 255.0).round(), 0, 255) / 255.
-        elif clip:
-            out = torch.clamp(out, 0, 1)
-        elif rounds:
-            out = (out * 255.0).round() / 255.
-        return out
-
-
-    # ----------------------- Random Poisson (Shot) Noise ----------------------- #
-
-
-    def random_generate_poisson_noise(self, img, scale_range=(0, 1.0), gray_prob=0):
-        scale = np.random.uniform(scale_range[0], scale_range[1])
-        if np.random.uniform() < gray_prob:
-            gray_noise = True
-        else:
-            gray_noise = False
-        return self.generate_poisson_noise(img, scale, gray_noise)
-
-
-    def random_add_poisson_noise(self, img, scale_range=(0, 1.0), gray_prob=0, clip=True, rounds=False):
-        noise = self.random_generate_poisson_noise(img, scale_range, gray_prob)
-        out = img + noise
-        if clip and rounds:
-            out = np.clip((out * 255.0).round(), 0, 255) / 255.
-        elif clip:
-            out = np.clip(out, 0, 1)
-        elif rounds:
-            out = (out * 255.0).round() / 255.
-        return out
-
-
-    def random_generate_poisson_noise_pt(self, img, scale_range=(0, 1.0), gray_prob=0):
-        scale = torch.rand(
-            img.size(0), dtype=img.dtype, device=img.device) * (scale_range[1] - scale_range[0]) + scale_range[0]
-        gray_noise = torch.rand(img.size(0), dtype=img.dtype, device=img.device)
-        gray_noise = (gray_noise < gray_prob).float()
-        return self.generate_poisson_noise_pt(img, scale, gray_noise)
-
-
-    def random_add_poisson_noise_pt(self, img, scale_range=(0, 1.0), gray_prob=0, clip=True, rounds=False):
-        noise = self.random_generate_poisson_noise_pt(img, scale_range, gray_prob)
-        out = img + noise
-        if clip and rounds:
-            out = torch.clamp((out * 255.0).round(), 0, 255) / 255.
-        elif clip:
-            out = torch.clamp(out, 0, 1)
-        elif rounds:
-            out = (out * 255.0).round() / 255.
-        return out
-
-
-    # ------------------------------------------------------------------------ #
-    # --------------------------- JPEG compression --------------------------- #
-    # ------------------------------------------------------------------------ #
-    def add_jpg_compression(self, img, quality=90):
-        """Add JPG compression artifacts.
-
-        Args:
-            img (Numpy array): Input image, shape (h, w, c), range [0, 1], float32.
-            quality (float): JPG compression quality. 0 for lowest quality, 100 for
-                best quality. Default: 90.
-
-        Returns:
-            (Numpy array): Returned image after JPG, shape (h, w, c), range[0, 1],
-                float32.
-        """
-        img = np.clip(img, 0, 1)
-        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
-        _, encimg = cv2.imencode('.jpg', img * 255., encode_param)
-        img = np.float32(cv2.imdecode(encimg, 1)) / 255.
-        return img
-
-
-    def random_add_jpg_compression(self, img, quality_range=(90, 100)):
-        """Randomly add JPG compression artifacts.
-
-        Args:
-            img (Numpy array): Input image, shape (h, w, c), range [0, 1], float32.
-            quality_range (tuple[float] | list[float]): JPG compression quality
-                range. 0 for lowest quality, 100 for best quality.
-                Default: (90, 100).
-
-        Returns:
-            (Numpy array): Returned image after JPG, shape (h, w, c), range[0, 1],
-                float32.
-        """
-        quality = np.random.uniform(quality_range[0], quality_range[1])
-        return self.add_jpg_compression(img, quality)
 
 if __name__ == '__main__':
     print('hi')

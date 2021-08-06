@@ -116,3 +116,36 @@ class BSRNet(nn.Module):
         fea = self.conv_last(fea)
         out = F.interpolate(fea, scale_factor=self.sf, mode='bicubic', align_corners=False)
         return out
+
+
+class BSRNetV2(nn.Module):
+    def __init__(self, scale_factor=4, in_nc=3, out_nc=3, nf=64, nb=23, gc=32):
+        super(BSRNetV2, self).__init__()
+        RRDB_block_f = functools.partial(RRDB, nf=nf, gc=gc)
+        self.sf = scale_factor
+        if self.sf == 2:
+            in_nc = in_nc * 4
+        elif self.sf == 4:
+            in_nc = in_nc * 16
+
+        self.conv_first = nn.Conv2d(in_nc, nf, 3, 1, 1, bias=True)
+        self.RRDB_trunk = make_layer(RRDB_block_f, nb)
+        self.trunk_conv = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
+        self.upconv1 = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
+        self.HRconv = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
+        self.conv_last = nn.Conv2d(nf, out_nc, 3, 1, 1, bias=True)
+        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
+    def forward(self, x):
+        if self.sf == 2:
+            feat = pixel_unshuffle(x, scale=2)
+        elif self.sf == 4:
+            feat = pixel_unshuffle(x, scale=4)
+
+        fea = self.conv_first(feat)
+        trunk = self.trunk_conv(self.RRDB_trunk(fea))
+        fea = fea + trunk
+        fea = self.lrelu(self.upconv1(F.interpolate(fea, scale_factor=2, mode='nearest')))
+        fea = self.conv_last(self.lrelu(self.HRconv(fea)))
+        out = F.interpolate(fea, scale_factor=2, mode='bicubic', align_corners=False)
+        return out

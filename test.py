@@ -6,7 +6,7 @@ import torch.backends.cudnn as cudnn
 import numpy as np
 import PIL.Image as pil_image
 
-from models import Generator
+from models import BSRNet
 from utils import preprocess, get_concat_h
 
 import time
@@ -21,7 +21,7 @@ if __name__ == '__main__':
     cudnn.benchmark = True
     device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
     #device = torch.device('cpu')
-    model = Generator().to(device)
+    model = BSRNet().to(device)
     state_dict = model.state_dict()
     try:
         for n, p in torch.load(args.weights_file,map_location=device).items():
