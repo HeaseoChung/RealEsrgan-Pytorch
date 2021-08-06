@@ -6,7 +6,7 @@ import torch.backends.cudnn as cudnn
 import numpy as np
 import PIL.Image as pil_image
 
-from models import LDSR_V2, LDSR_V3, LDSR_V4, LDSR_V4_1, LDSR_V5, LDSR_V4_2
+from models.models import Generator
 from utils import preprocess, get_concat_h
 
 import time
@@ -20,10 +20,9 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     cudnn.benchmark = True
-    device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-    model = LDSR_V4_2(scale_factor=args.scale).to(device)
-    #model.load_state_dict(torch.load(args.weights_file, map_location=device))
+    model = Generator(scale_factor=args.scale).to(device)
 
     state_dict = model.state_dict()
     try:
@@ -60,7 +59,7 @@ if __name__ == '__main__':
     output = np.array(preds).transpose([1,2,0])
     output = np.clip(output, 0.0, 255.0).astype(np.uint8)
     output = pil_image.fromarray(output)
-    output.save(args.image_file.replace('.', '_LDSR_x{}.'.format(args.scale)))
+    output.save(args.image_file.replace('.', '_RealESRGAN_x{}.'.format(args.scale)))
 
     if args.merge:
         merge = get_concat_h(bicubic, output).save(args.image_file.replace('.', '_hconcat_.'))
