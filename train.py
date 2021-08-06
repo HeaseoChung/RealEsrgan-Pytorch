@@ -14,7 +14,7 @@ from torch import nn
 from torch.cuda import amp
 from torch.utils.tensorboard import SummaryWriter
 
-from models import BSRNet, BSRNetV2
+from models import Generator
 from utils import AverageMeter, calc_psnr
 from dataset import Dataset
 
@@ -56,11 +56,11 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
 
     """ FUNIE 모델 설정 """
-    model = BSRNetV2().to(device)
+    model = Generator().to(device)
 
     """ Loss 및 Optimizer 설정 """
     pixel_criterion = nn.L1Loss().to(device)
-    psnr_optimizer = torch.optim.Adam(model.parameters(), args.psnr_lr, (0.9, 0.999))
+    psnr_optimizer = torch.optim.Adam(model.parameters(), args.psnr_lr, (0.9, 0.99))
     interval_epoch = math.ceil(args.num_epochs // 8)
     epoch_indices = [interval_epoch, interval_epoch * 2, interval_epoch * 4, interval_epoch * 6]
     #psnr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(psnr_optimizer, psnr_epoch_indices, 1, 1e-7)

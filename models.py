@@ -1,24 +1,12 @@
+import functools
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
-import functools
+import numpy as np
 
-def pixel_unshuffle(x, scale):
-    """ Pixel unshuffle.
-    Args:
-        x (Tensor): Input feature with shape (b, c, hh, hw).
-        scale (int): Downsample ratio.
-    Returns:
-        Tensor: the pixel unshuffled feature.
-    """
-    b, c, hh, hw = x.size()
-    out_channel = c * (scale**2)
-    assert hh % scale == 0 and hw % scale == 0
-    h = hh // scale
-    w = hw // scale
-    x_view = x.view(b, c, h, scale, w, scale)
-    return x_view.permute(0, 1, 3, 5, 2, 4).reshape(b, out_channel, h, w)
+from torch.nn.utils import spectral_norm
+
 
 def initialize_weights(net_l, scale=1):
     if not isinstance(net_l, list):
@@ -86,66 +74,114 @@ class RRDB(nn.Module):
         return out * 0.2 + x
 
 
-class BSRNet(nn.Module):
-    def __init__(self, scale_factor=2, in_nc=3, out_nc=3, nf=64, nb=23, gc=32):
-        super(BSRNet, self).__init__()
+class Generator(nn.Module):
+    def __init__(self, scale_factor, in_nc=3, out_nc=3, nf=64, nb=23, gc=32):
+        super(Generator, self).__init__()
         RRDB_block_f = functools.partial(RRDB, nf=nf, gc=gc)
         self.sf = scale_factor
-        if self.sf == 2:
-            in_nc = in_nc * 4
-        elif self.sf == 1:
-            in_nc = in_nc * 16
 
         self.conv_first = nn.Conv2d(in_nc, nf, 3, 1, 1, bias=True)
         self.RRDB_trunk = make_layer(RRDB_block_f, nb)
         self.trunk_conv = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
-        self.HRconv = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
-        self.conv_last = nn.Sequential(
-            nn.Conv2d(nf, in_nc * (scale_factor ** 2), kernel_size=3, stride=1, padding=1), 
-            nn.PReLU(in_nc * (scale_factor ** 2)),
-            nn.Conv2d(in_nc * (scale_factor ** 2), out_nc, kernel_size=3, stride=1, padding=1)
-            )
-        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
-
-    def forward(self, x):
-        fea = pixel_unshuffle(x, scale=2)
-        fea = self.conv_first(fea)
-        trunk = self.trunk_conv(self.RRDB_trunk(fea))
-        fea = fea + trunk
-        fea = self.lrelu(self.HRconv(fea))
-        fea = self.conv_last(fea)
-        out = F.interpolate(fea, scale_factor=self.sf, mode='bicubic', align_corners=False)
-        return out
-
-
-class BSRNetV2(nn.Module):
-    def __init__(self, scale_factor=4, in_nc=3, out_nc=3, nf=64, nb=23, gc=32):
-        super(BSRNetV2, self).__init__()
-        RRDB_block_f = functools.partial(RRDB, nf=nf, gc=gc)
-        self.sf = scale_factor
-        if self.sf == 2:
-            in_nc = in_nc * 4
-        elif self.sf == 4:
-            in_nc = in_nc * 16
-
-        self.conv_first = nn.Conv2d(in_nc, nf, 3, 1, 1, bias=True)
-        self.RRDB_trunk = make_layer(RRDB_block_f, nb)
-        self.trunk_conv = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
+        #### upsampling
         self.upconv1 = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
+        if self.sf==4:
+            self.upconv2 = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
         self.HRconv = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
         self.conv_last = nn.Conv2d(nf, out_nc, 3, 1, 1, bias=True)
+
         self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
     def forward(self, x):
-        if self.sf == 2:
-            feat = pixel_unshuffle(x, scale=2)
-        elif self.sf == 4:
-            feat = pixel_unshuffle(x, scale=4)
-
-        fea = self.conv_first(feat)
+        fea = self.conv_first(x)
         trunk = self.trunk_conv(self.RRDB_trunk(fea))
         fea = fea + trunk
+
         fea = self.lrelu(self.upconv1(F.interpolate(fea, scale_factor=2, mode='nearest')))
-        fea = self.conv_last(self.lrelu(self.HRconv(fea)))
-        out = F.interpolate(fea, scale_factor=2, mode='bicubic', align_corners=False)
+        if self.sf==4:
+            fea = self.lrelu(self.upconv2(F.interpolate(fea, scale_factor=2, mode='nearest')))
+        out = self.conv_last(self.lrelu(self.HRconv(fea)))
+
         return out
+
+
+# --------------------------------------------
+# PatchGAN discriminator
+# If n_layers = 3, then the receptive field is 70x70
+# --------------------------------------------
+class Discriminator(nn.Module):
+    def __init__(self, input_nc=3, ndf=64, n_layers=3, norm_type='batch'):
+        super(Discriminator, self).__init__()
+        self.n_layers = n_layers
+
+        '''
+        'batch'
+        'instance'
+        'spectral'
+        'batchspectral'
+        'none'
+        '''
+        if norm_type == 'batch':
+            norm_layer = functools.partial(nn.BatchNorm2d, affine=True, track_running_stats=True)
+            use_sp_norm = False
+            use_bias = False
+        elif norm_type == 'instance':
+            norm_layer = functools.partial(nn.InstanceNorm2d, affine=False, track_running_stats=False)
+            use_sp_norm = False
+            use_bias = True
+        elif norm_type == 'spectral':
+            norm_layer = None
+            use_sp_norm = True
+            use_bias = True
+        elif norm_type == 'batchspectral':
+            norm_layer = functools.partial(nn.BatchNorm2d, affine=True, track_running_stats=True)
+            use_sp_norm = True
+            use_bias = False
+        elif norm_type == 'none':
+            norm_layer = None
+            use_sp_norm = False
+            use_bias = True
+        else:
+            raise NotImplementedError('normalization layer [%s] is not found' % norm_type)
+
+        kw = 4
+        padw = int(np.ceil((kw-1.0)/2))
+        sequence = [
+            self.use_spectral_norm(nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw), use_sp_norm),
+            nn.LeakyReLU(0.2)
+        ]
+
+        nf_mult = 1
+        nf_mult_prev = 1
+        for n in range(1, n_layers):
+            nf_mult_prev = nf_mult
+            nf_mult = min(2**n, 8)
+            sequence += [
+                self.use_spectral_norm(nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=2, padding=padw, bias=use_bias), use_sp_norm),
+                norm_layer(ndf * nf_mult) if norm_layer else None,
+                nn.LeakyReLU(0.2)
+            ]
+
+        nf_mult_prev = nf_mult
+        nf_mult = min(2**n_layers, 8)
+        sequence += [
+            self.use_spectral_norm(nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=use_bias), use_sp_norm),
+            norm_layer(ndf * nf_mult) if norm_layer else None,
+            nn.LeakyReLU(0.2)
+        ]
+        sequence += [self.use_spectral_norm(nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw), use_sp_norm)]
+        
+        sequence_new = []
+        for n in range(len(sequence)):
+            if sequence[n] is not None:
+                sequence_new.append(sequence[n])
+
+        self.model = nn.Sequential(*sequence_new)
+
+    def use_spectral_norm(self, module, mode=False):
+        if mode:
+            return spectral_norm(module)
+        return module
+
+    def forward(self, input):
+        return self.model(input)
