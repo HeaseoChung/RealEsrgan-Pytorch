@@ -1,9 +1,9 @@
-# python train.py --train-file data/train --eval-file data/eval --outputs-dir models --scale 3
-# python train.py --train-file data/train --eval-file data/eval --outputs-dir models --scale 3 --checkpoint-file 
 import argparse
 import os
 import math
 import logging
+
+from PIL.Image import RASTERIZE
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -241,14 +241,15 @@ if __name__ == '__main__':
     """ GAN model args setup"""
     parser.add_argument('--num-net-epochs', type=int, default=100000)
     parser.add_argument('--resume_net', type=str, default='resume_net.pth')
+    parser.add_argument('--psnr-lr', type=float, default=0.0001)
 
     """ GAN model args setup"""
     parser.add_argument('--num-gan-epochs', type=int, default=100000)
-    parser.add_argument('--resume_g', type=str, default='resume_genertaor.pth')
-    parser.add_argument('--resume_d', type=str, default='resume_discriminator.pth')
+    parser.add_argument('--resume-g', type=str, default='resume_genertaor.pth')
+    parser.add_argument('--resume-d', type=str, default='resume_discriminator.pth')
+    parser.add_argument('--gan-lr', type=float, default=0.0002)
     
     """etc args setup"""
-    parser.add_argument('--psnr-lr', type=float, default=0.0001)
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--patch-size', type=int, default=256)
     parser.add_argument('--num-workers', type=int, default=8)
@@ -275,10 +276,10 @@ if __name__ == '__main__':
     generator = Generator(args.scale).to(device)
 
     pixel_criterion = nn.L1Loss().to(device)
-    net_optimizer = torch.optim.Adam(model.parameters(), args.psnr_lr, (0.9, 0.99))
+    net_optimizer = torch.optim.Adam(generator.parameters(), args.psnr_lr, (0.9, 0.99))
     interval_epoch = math.ceil(args.num_net_epochs // 8)
     epoch_indices = [interval_epoch, interval_epoch * 2, interval_epoch * 4, interval_epoch * 6]
-    net_scheduler = torch.optim.lr_scheduler.MultiStepLR(net_optimizer, milestones=[1000,2000,3000,4000], gamma=0.5)
+    net_scheduler = torch.optim.lr_scheduler.MultiStepLR(net_optimizer, milestones=epoch_indices, gamma=0.5)
     scaler = amp.GradScaler()
 
     total_net_epoch = args.num_net_epochs
@@ -286,8 +287,8 @@ if __name__ == '__main__':
     best_psnr = 0
 
     """ RealESNet 체크포인트 weight 불러오기 """
-    if os.path.exists(args.checkpoint_file):
-        checkpoint = torch.load(args.checkpoint_file)
+    if os.path.exists(args.resume_net):
+        checkpoint = torch.load(args.resume_net)
         generator.load_state_dict(checkpoint['model_state_dict'])
         net_optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_net_epoch = checkpoint['epoch'] + 1
@@ -327,12 +328,13 @@ if __name__ == '__main__':
                                 num_workers=args.num_workers,
                                 pin_memory=True
                                 )
-
+    """NET Training"""
     for epoch in range(start_net_epoch, total_net_epoch):
-        net_trainer(train_dataloader=train_dataloader, eval_dataloader=eval_dataloader, model=model, pixel_criterion=pixel_criterion, net_optimizer=net_optimizer, epoch=epoch, best_psnr=best_psnr, scaler=scaler, writer=writer, args=args)
+        net_trainer(train_dataloader=train_dataloader, eval_dataloader=eval_dataloader, model=generator, pixel_criterion=pixel_criterion, net_optimizer=net_optimizer, epoch=epoch, best_psnr=best_psnr, scaler=scaler, writer=writer, args=args)
         net_scheduler.step()
 
-    """GAN Training"""
+
+    """ RealESNet 체크포인트 weight 불러오기 """
     discriminator = Discriminator().to(device)
 
     total_gan_epoch = args.num_gan_epochs
@@ -351,20 +353,30 @@ if __name__ == '__main__':
     generator_scheduler = torch.optim.lr_scheduler.MultiStepLR(generator_optimizer, milestones=epoch_indices, gamma=0.5)
 
     """ 체크포인트 weight 불러오기 """
-    if os.path.exists(args.resume_g) and os.path.exists(args.resume_d):
+    if os.path.exists(args.resume_g) :
         """ resume generator """
-        checkpoint_g = torch.load(args.resume_g)
-        generator.load_state_dict(checkpoint_g['model_state_dict'])
-        g_epoch = checkpoint_g['epoch'] + 1
-        generator_optimizer.load_state_dict(checkpoint_g['optimizer_state_dict'])
+        #checkpoint_g = torch.load(args.resume_g)['params_ema']
+        
+        state_dict = generator.state_dict()
+        for n, p in torch.load(args.resume_g,map_location=device)['params_ema'].items():
+            if n in state_dict.keys():
+                state_dict[n].copy_(p)
+            else:
+                raise RuntimeError("Model error")
 
+
+        # generator.load_state_dict(checkpoint_g['model_state_dict'])
+        # g_epoch = checkpoint_g['epoch'] + 1
+        # generator_optimizer.load_state_dict(checkpoint_g['optimizer_state_dict'])
+
+    if os.path.exists(args.resume_d):
         """ resume discriminator """
         checkpoint_d = torch.load(args.resume_d)
         discriminator.load_state_dict(checkpoint_d['model_state_dict'])
         d_epoch = checkpoint_g['epoch'] + 1
         discriminator_optimizer.load_state_dict(checkpoint_d['optimizer_state_dict'])
 
-    """ 로그 인포 프린트 하기 """
+    """ RealESGAN 로그 인포 프린트 하기 """
     logger.info(
                 f"RealESRGAN MODEL INFO:\n"
                 f"\tScale factor:                  {args.scale}\n"
@@ -380,6 +392,7 @@ if __name__ == '__main__':
                 f"\tBatch size:                    {args.batch_size}\n"
                 )
 
+    """GAN Training"""
     for epoch in range(start_gan_epoch, total_gan_epoch):
         gan_trainer(train_dataloader=train_dataloader, eval_dataloader=eval_dataloader, generator=generator, discriminator=discriminator, pixel_criterion=pixel_criterion, content_criterion=content_criterion, adversarial_criterion=adversarial_criterion, generator_optimizer=generator_optimizer, discriminator_optimizer=discriminator_optimizer, epoch=epoch, best_ssim=best_ssim, scaler=scaler, writer=writer, args=args)
         discriminator_scheduler.step()

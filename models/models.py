@@ -1,53 +1,74 @@
-import functools
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.nn.init as init
-import numpy as np
-
+from torch import nn as nn
+from torch.nn import functional as F
+from torch.nn import init as init
 from torch.nn.utils import spectral_norm
 
-
-def initialize_weights(net_l, scale=1):
-    if not isinstance(net_l, list):
-        net_l = [net_l]
-    for net in net_l:
-        for m in net.modules():
+@torch.no_grad()
+def default_init_weights(module_list, scale=1, bias_fill=0, **kwargs):
+    """Initialize network weights.
+    Args:
+        module_list (list[nn.Module] | nn.Module): Modules to be initialized.
+        scale (float): Scale initialized weights, especially for residual
+            blocks. Default: 1.
+        bias_fill (float): The value to fill bias. Default: 0
+        kwargs (dict): Other arguments for initialization function.
+    """
+    if not isinstance(module_list, list):
+        module_list = [module_list]
+    for module in module_list:
+        for m in module.modules():
             if isinstance(m, nn.Conv2d):
-                init.kaiming_normal_(m.weight, a=0, mode='fan_in')
-                m.weight.data *= scale  # for residual block
-                if m.bias is not None:
-                    m.bias.data.zero_()
-            elif isinstance(m, nn.Linear):
-                init.kaiming_normal_(m.weight, a=0, mode='fan_in')
+                init.kaiming_normal_(m.weight, **kwargs)
                 m.weight.data *= scale
                 if m.bias is not None:
-                    m.bias.data.zero_()
-            elif isinstance(m, nn.BatchNorm2d):
+                    m.bias.data.fill_(bias_fill)
+            elif isinstance(m, nn.Linear):
+                init.kaiming_normal_(m.weight, **kwargs)
+                m.weight.data *= scale
+                if m.bias is not None:
+                    m.bias.data.fill_(bias_fill)
+            elif isinstance(m, _BatchNorm):
                 init.constant_(m.weight, 1)
-                init.constant_(m.bias.data, 0.0)
+                if m.bias is not None:
+                    m.bias.data.fill_(bias_fill)
 
-
-def make_layer(block, n_layers):
+def make_layer(basic_block, num_basic_block, **kwarg):
+    """Make layers by stacking the same blocks.
+    Args:
+        basic_block (nn.module): nn.module class for basic block.
+        num_basic_block (int): number of blocks.
+    Returns:
+        nn.Sequential: Stacked blocks in nn.Sequential.
+    """
     layers = []
-    for _ in range(n_layers):
-        layers.append(block())
+    for _ in range(num_basic_block):
+        layers.append(basic_block(**kwarg))
     return nn.Sequential(*layers)
 
 
-class ResidualDenseBlock_5C(nn.Module):
-    def __init__(self, nf=64, gc=32, bias=True):
-        super(ResidualDenseBlock_5C, self).__init__()
-        # gc: growth channel, i.e. intermediate channels
-        self.conv1 = nn.Conv2d(nf, gc, 3, 1, 1, bias=bias)
-        self.conv2 = nn.Conv2d(nf + gc, gc, 3, 1, 1, bias=bias)
-        self.conv3 = nn.Conv2d(nf + 2 * gc, gc, 3, 1, 1, bias=bias)
-        self.conv4 = nn.Conv2d(nf + 3 * gc, gc, 3, 1, 1, bias=bias)
-        self.conv5 = nn.Conv2d(nf + 4 * gc, nf, 3, 1, 1, bias=bias)
+class ResidualDenseBlock(nn.Module):
+    """Residual Dense Block.
+
+    Used in RRDB block in ESRGAN.
+
+    Args:
+        num_feat (int): Channel number of intermediate features.
+        num_grow_ch (int): Channels for each growth.
+    """
+
+    def __init__(self, num_feat=64, num_grow_ch=32):
+        super(ResidualDenseBlock, self).__init__()
+        self.conv1 = nn.Conv2d(num_feat, num_grow_ch, 3, 1, 1)
+        self.conv2 = nn.Conv2d(num_feat + num_grow_ch, num_grow_ch, 3, 1, 1)
+        self.conv3 = nn.Conv2d(num_feat + 2 * num_grow_ch, num_grow_ch, 3, 1, 1)
+        self.conv4 = nn.Conv2d(num_feat + 3 * num_grow_ch, num_grow_ch, 3, 1, 1)
+        self.conv5 = nn.Conv2d(num_feat + 4 * num_grow_ch, num_feat, 3, 1, 1)
+
         self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
         # initialization
-        initialize_weights([self.conv1, self.conv2, self.conv3, self.conv4, self.conv5], 0.1)
+        default_init_weights([self.conv1, self.conv2, self.conv3, self.conv4, self.conv5], 0.1)
 
     def forward(self, x):
         x1 = self.lrelu(self.conv1(x))
@@ -55,133 +76,130 @@ class ResidualDenseBlock_5C(nn.Module):
         x3 = self.lrelu(self.conv3(torch.cat((x, x1, x2), 1)))
         x4 = self.lrelu(self.conv4(torch.cat((x, x1, x2, x3), 1)))
         x5 = self.conv5(torch.cat((x, x1, x2, x3, x4), 1))
+        # Emperically, we use 0.2 to scale the residual for better performance
         return x5 * 0.2 + x
 
 
 class RRDB(nn.Module):
-    '''Residual in Residual Dense Block'''
+    """Residual in Residual Dense Block.
 
-    def __init__(self, nf, gc=32):
+    Used in RRDB-Net in ESRGAN.
+
+    Args:
+        num_feat (int): Channel number of intermediate features.
+        num_grow_ch (int): Channels for each growth.
+    """
+
+    def __init__(self, num_feat, num_grow_ch=32):
         super(RRDB, self).__init__()
-        self.RDB1 = ResidualDenseBlock_5C(nf, gc)
-        self.RDB2 = ResidualDenseBlock_5C(nf, gc)
-        self.RDB3 = ResidualDenseBlock_5C(nf, gc)
+        self.rdb1 = ResidualDenseBlock(num_feat, num_grow_ch)
+        self.rdb2 = ResidualDenseBlock(num_feat, num_grow_ch)
+        self.rdb3 = ResidualDenseBlock(num_feat, num_grow_ch)
 
     def forward(self, x):
-        out = self.RDB1(x)
-        out = self.RDB2(out)
-        out = self.RDB3(out)
+        out = self.rdb1(x)
+        out = self.rdb2(out)
+        out = self.rdb3(out)
+        # Emperically, we use 0.2 to scale the residual for better performance
         return out * 0.2 + x
 
 
 class Generator(nn.Module):
-    def __init__(self, scale_factor, in_nc=3, out_nc=3, nf=64, nb=23, gc=32):
-        super(Generator, self).__init__()
-        RRDB_block_f = functools.partial(RRDB, nf=nf, gc=gc)
-        self.sf = scale_factor
+    """Networks consisting of Residual in Residual Dense Block, which is used
+    in ESRGAN.
 
-        self.conv_first = nn.Conv2d(in_nc, nf, 3, 1, 1, bias=True)
-        self.RRDB_trunk = make_layer(RRDB_block_f, nb)
-        self.trunk_conv = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
-        #### upsampling
-        self.upconv1 = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
-        if self.sf==4:
-            self.upconv2 = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
-        self.HRconv = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
-        self.conv_last = nn.Conv2d(nf, out_nc, 3, 1, 1, bias=True)
+    ESRGAN: Enhanced Super-Resolution Generative Adversarial Networks.
+
+    We extend ESRGAN for scale x2 and scale x1.
+    Note: This is one option for scale 1, scale 2 in RRDBNet.
+    We first employ the pixel-unshuffle (an inverse operation of pixelshuffle to reduce the spatial size
+    and enlarge the channel size before feeding inputs into the main ESRGAN architecture.
+
+    Args:
+        num_in_ch (int): Channel number of inputs.
+        num_out_ch (int): Channel number of outputs.
+        num_feat (int): Channel number of intermediate features.
+            Default: 64
+        num_block (int): Block number in the trunk network. Defaults: 23
+        num_grow_ch (int): Channels for each growth. Default: 32.
+    """
+
+    def __init__(self, scale=4, num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32):
+        super(Generator, self).__init__()
+        self.scale = scale
+        self.conv_first = nn.Conv2d(num_in_ch, num_feat, 3, 1, 1)
+        self.body = make_layer(RRDB, num_block, num_feat=num_feat, num_grow_ch=num_grow_ch)
+        self.conv_body = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        # upsample
+        self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_hr = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
 
         self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
     def forward(self, x):
-        fea = self.conv_first(x)
-        trunk = self.trunk_conv(self.RRDB_trunk(fea))
-        fea = fea + trunk
-
-        fea = self.lrelu(self.upconv1(F.interpolate(fea, scale_factor=2, mode='nearest')))
-        if self.sf==4:
-            fea = self.lrelu(self.upconv2(F.interpolate(fea, scale_factor=2, mode='nearest')))
-        out = self.conv_last(self.lrelu(self.HRconv(fea)))
-
+        feat = self.conv_first(x)
+        body_feat = self.conv_body(self.body(feat))
+        feat = feat + body_feat
+        
+        feat = self.lrelu(self.conv_up1(F.interpolate(feat, scale_factor=2, mode='nearest')))
+        if self.scale == 4:
+            feat = self.lrelu(self.conv_up2(F.interpolate(feat, scale_factor=2, mode='nearest')))
+        out = self.conv_last(self.lrelu(self.conv_hr(feat)))
         return out
 
 
-# --------------------------------------------
-# PatchGAN discriminator
-# If n_layers = 3, then the receptive field is 70x70
-# --------------------------------------------
 class Discriminator(nn.Module):
-    def __init__(self, input_nc=3, ndf=64, n_layers=3, norm_type='batch'):
+    """Defines a U-Net discriminator with spectral normalization (SN)"""
+
+    def __init__(self, num_in_ch=3, num_feat=64, skip_connection=True):
         super(Discriminator, self).__init__()
-        self.n_layers = n_layers
+        self.skip_connection = skip_connection
+        norm = spectral_norm
 
-        '''
-        'batch'
-        'instance'
-        'spectral'
-        'batchspectral'
-        'none'
-        '''
-        if norm_type == 'batch':
-            norm_layer = functools.partial(nn.BatchNorm2d, affine=True, track_running_stats=True)
-            use_sp_norm = False
-            use_bias = False
-        elif norm_type == 'instance':
-            norm_layer = functools.partial(nn.InstanceNorm2d, affine=False, track_running_stats=False)
-            use_sp_norm = False
-            use_bias = True
-        elif norm_type == 'spectral':
-            norm_layer = None
-            use_sp_norm = True
-            use_bias = True
-        elif norm_type == 'batchspectral':
-            norm_layer = functools.partial(nn.BatchNorm2d, affine=True, track_running_stats=True)
-            use_sp_norm = True
-            use_bias = False
-        elif norm_type == 'none':
-            norm_layer = None
-            use_sp_norm = False
-            use_bias = True
-        else:
-            raise NotImplementedError('normalization layer [%s] is not found' % norm_type)
+        self.conv0 = nn.Conv2d(num_in_ch, num_feat, kernel_size=3, stride=1, padding=1)
 
-        kw = 4
-        padw = int(np.ceil((kw-1.0)/2))
-        sequence = [
-            self.use_spectral_norm(nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw), use_sp_norm),
-            nn.LeakyReLU(0.2)
-        ]
+        self.conv1 = norm(nn.Conv2d(num_feat, num_feat * 2, 4, 2, 1, bias=False))
+        self.conv2 = norm(nn.Conv2d(num_feat * 2, num_feat * 4, 4, 2, 1, bias=False))
+        self.conv3 = norm(nn.Conv2d(num_feat * 4, num_feat * 8, 4, 2, 1, bias=False))
+        # upsample
+        self.conv4 = norm(nn.Conv2d(num_feat * 8, num_feat * 4, 3, 1, 1, bias=False))
+        self.conv5 = norm(nn.Conv2d(num_feat * 4, num_feat * 2, 3, 1, 1, bias=False))
+        self.conv6 = norm(nn.Conv2d(num_feat * 2, num_feat, 3, 1, 1, bias=False))
 
-        nf_mult = 1
-        nf_mult_prev = 1
-        for n in range(1, n_layers):
-            nf_mult_prev = nf_mult
-            nf_mult = min(2**n, 8)
-            sequence += [
-                self.use_spectral_norm(nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=2, padding=padw, bias=use_bias), use_sp_norm),
-                norm_layer(ndf * nf_mult) if norm_layer else None,
-                nn.LeakyReLU(0.2)
-            ]
+        # extra
+        self.conv7 = norm(nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=False))
+        self.conv8 = norm(nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=False))
 
-        nf_mult_prev = nf_mult
-        nf_mult = min(2**n_layers, 8)
-        sequence += [
-            self.use_spectral_norm(nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=use_bias), use_sp_norm),
-            norm_layer(ndf * nf_mult) if norm_layer else None,
-            nn.LeakyReLU(0.2)
-        ]
-        sequence += [self.use_spectral_norm(nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw), use_sp_norm)]
-        
-        sequence_new = []
-        for n in range(len(sequence)):
-            if sequence[n] is not None:
-                sequence_new.append(sequence[n])
+        self.conv9 = nn.Conv2d(num_feat, 1, 3, 1, 1)
 
-        self.model = nn.Sequential(*sequence_new)
+    def forward(self, x):
+        x0 = F.leaky_relu(self.conv0(x), negative_slope=0.2, inplace=True)
+        x1 = F.leaky_relu(self.conv1(x0), negative_slope=0.2, inplace=True)
+        x2 = F.leaky_relu(self.conv2(x1), negative_slope=0.2, inplace=True)
+        x3 = F.leaky_relu(self.conv3(x2), negative_slope=0.2, inplace=True)
 
-    def use_spectral_norm(self, module, mode=False):
-        if mode:
-            return spectral_norm(module)
-        return module
+        # upsample
+        x3 = F.interpolate(x3, scale_factor=2, mode='bilinear', align_corners=False)
+        x4 = F.leaky_relu(self.conv4(x3), negative_slope=0.2, inplace=True)
 
-    def forward(self, input):
-        return self.model(input)
+        if self.skip_connection:
+            x4 = x4 + x2
+        x4 = F.interpolate(x4, scale_factor=2, mode='bilinear', align_corners=False)
+        x5 = F.leaky_relu(self.conv5(x4), negative_slope=0.2, inplace=True)
+
+        if self.skip_connection:
+            x5 = x5 + x1
+        x5 = F.interpolate(x5, scale_factor=2, mode='bilinear', align_corners=False)
+        x6 = F.leaky_relu(self.conv6(x5), negative_slope=0.2, inplace=True)
+
+        if self.skip_connection:
+            x6 = x6 + x0
+
+        # extra
+        out = F.leaky_relu(self.conv7(x6), negative_slope=0.2, inplace=True)
+        out = F.leaky_relu(self.conv8(out), negative_slope=0.2, inplace=True)
+        out = self.conv9(out)
+
+        return out
