@@ -2,3 +2,4 @@ weights
 *.out
 __pycache__/
 pretrained
+examples

@@ -5,7 +5,7 @@ import torch.backends.cudnn as cudnn
 import numpy as np
 import PIL.Image as pil_image
 
-from models import Generator
+from models.models import Generator
 from utils import preprocess
 
 
