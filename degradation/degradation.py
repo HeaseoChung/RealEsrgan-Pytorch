@@ -143,7 +143,7 @@ class Degradation:
             flags = cv2.INTER_CUBIC
 
         image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=flags)
-        image = cv2.resize(image, (w,h), interpolation=flags)
+        image = cv2.resize(image, (w, h), interpolation=flags)
         return image.clip(0, 255)
 
     def random_resizing2(self, image):
@@ -165,33 +165,31 @@ class Degradation:
         elif mode == "bicubic":
             flags = cv2.INTER_CUBIC
 
-        image = cv2.resize(
-            image, (int(w * scale), int(h * scale)), interpolation=flags
-        )
-        image = cv2.resize(image, (w,h), interpolation=flags)
+        image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=flags)
+        image = cv2.resize(image, (w, h), interpolation=flags)
         return image.clip(0, 255)
 
     def generate_kernel1(self, image):
         kernel_size = random.choice(self.kernel_range)
-        # if np.random.uniform() < self.sinc_prob:
-        #     # this sinc filter setting is for kernels ranging from [7, 21]
-        #     if kernel_size < 13:
-        #         omega_c = np.random.uniform(np.pi / 3, np.pi)
-        #     else:
-        #         omega_c = np.random.uniform(np.pi / 5, np.pi)
-        #     kernel = self.circular_lowpass_kernel(omega_c, kernel_size, pad_to=False)
-        # else:
-        kernel = self.random_mixed_kernels(
-            self.kernel_list,
-            self.kernel_prob,
-            kernel_size,
-            self.blur_sigma,
-            self.blur_sigma,
-            [-math.pi, math.pi],
-            self.betag_range,
-            self.betap_range,
-            noise_range=None,
-        )
+        if np.random.uniform() < self.sinc_prob:
+            # this sinc filter setting is for kernels ranging from [7, 21]
+            if kernel_size < 13:
+                omega_c = np.random.uniform(np.pi / 3, np.pi)
+            else:
+                omega_c = np.random.uniform(np.pi / 5, np.pi)
+            kernel = self.circular_lowpass_kernel(omega_c, kernel_size, pad_to=False)
+        else:
+            kernel = self.random_mixed_kernels(
+                self.kernel_list,
+                self.kernel_prob,
+                kernel_size,
+                self.blur_sigma,
+                self.blur_sigma,
+                [-math.pi, math.pi],
+                self.betag_range,
+                self.betap_range,
+                noise_range=None,
+            )
 
         # pad kernel
         pad_size = (21 - kernel_size) // 2
@@ -204,24 +202,24 @@ class Degradation:
 
     def generate_kernel2(self, image):
         kernel_size = random.choice(self.kernel_range)
-        # if np.random.uniform() < self.sinc_prob2:
-        #     if kernel_size < 13:
-        #         omega_c = np.random.uniform(np.pi / 3, np.pi)
-        #     else:
-        #         omega_c = np.random.uniform(np.pi / 5, np.pi)
-        #     kernel2 = self.circular_lowpass_kernel(omega_c, kernel_size, pad_to=False)
-        # else:
-        kernel2 = self.random_mixed_kernels(
-            self.kernel_list2,
-            self.kernel_prob2,
-            kernel_size,
-            self.blur_sigma2,
-            self.blur_sigma2,
-            [-math.pi, math.pi],
-            self.betag_range2,
-            self.betap_range2,
-            noise_range=None,
-        )
+        if np.random.uniform() < self.sinc_prob2:
+            if kernel_size < 13:
+                omega_c = np.random.uniform(np.pi / 3, np.pi)
+            else:
+                omega_c = np.random.uniform(np.pi / 5, np.pi)
+            kernel2 = self.circular_lowpass_kernel(omega_c, kernel_size, pad_to=False)
+        else:
+            kernel2 = self.random_mixed_kernels(
+                self.kernel_list2,
+                self.kernel_prob2,
+                kernel_size,
+                self.blur_sigma2,
+                self.blur_sigma2,
+                [-math.pi, math.pi],
+                self.betag_range2,
+                self.betap_range2,
+                noise_range=None,
+            )
 
         # pad kernel
         pad_size = (21 - kernel_size) // 2
@@ -233,13 +231,13 @@ class Degradation:
         return image.clip(min=0, max=255)
 
     def generate_sinc(self, image):
-        # if np.random.uniform() < self.final_sinc_prob:
-        #     kernel_size = random.choice(self.kernel_range)
-        #     omega_c = np.random.uniform(np.pi / 3, np.pi)
-        #     sinc_kernel = self.circular_lowpass_kernel(omega_c, kernel_size, pad_to=21)
-        #     sinc_kernel = torch.FloatTensor(sinc_kernel)
-        # else:
-        sinc_kernel = self.pulse_tensor
+        if np.random.uniform() < self.final_sinc_prob:
+            kernel_size = random.choice(self.kernel_range)
+            omega_c = np.random.uniform(np.pi / 3, np.pi)
+            sinc_kernel = self.circular_lowpass_kernel(omega_c, kernel_size, pad_to=21)
+            sinc_kernel = torch.FloatTensor(sinc_kernel)
+        else:
+            sinc_kernel = self.pulse_tensor
 
         image = ndimage.filters.convolve(
             image, np.expand_dims(sinc_kernel, axis=2), mode="reflect"
