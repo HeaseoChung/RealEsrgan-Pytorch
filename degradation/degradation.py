@@ -60,7 +60,7 @@ class Degradation:
         ).float()  # convolving with pulse tensor brings no blurry effect
         self.pulse_tensor[10, 10] = 1
 
-    def degradation_pipeline(self, image, sf=2):
+    def degradation_pipeline(self, image):
         """Generate kernels (used in the first degradation)"""
         self.ori_w, self.ori_h = image.size
         image = self.generate_kernel1(image)
@@ -72,16 +72,14 @@ class Degradation:
 
         """ Generate kernels (used in the second degradation) """
         image = self.generate_kernel2(image)
-        image = self.random_resizing2(image, sf)
+        image = self.random_resizing2(image)
         image = self.random_poisson_noise(image)
         image = self.random_gaussian_noise(image)
         if np.random.uniform() < 0.5:
-            image = self.final_resizing(image, sf)
             image = self.generate_sinc(image)
             image = self.random_jpeg_noise(image)
         else:
             image = self.random_jpeg_noise(image)
-            image = self.final_resizing(image, sf)
             image = self.generate_sinc(image)
         return Image.fromarray(image.clip(0, 255).astype(np.uint8))
 
@@ -145,11 +143,10 @@ class Degradation:
             flags = cv2.INTER_CUBIC
 
         image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=flags)
-
-        # image = cv2.resize(image, (w,h), interpolation=flags)
+        image = cv2.resize(image, (w,h), interpolation=flags)
         return image.clip(0, 255)
 
-    def random_resizing2(self, image, sf):
+    def random_resizing2(self, image):
         h, w, c = image.shape
         updown_type = random.choices(self.updown_type, self.resize_prob2)
         mode = random.choice(self.mode_list)
@@ -169,26 +166,9 @@ class Degradation:
             flags = cv2.INTER_CUBIC
 
         image = cv2.resize(
-            image, (int(w / sf * scale), int(h / sf * scale)), interpolation=flags
+            image, (int(w * scale), int(h * scale)), interpolation=flags
         )
-
-        # image = cv2.resize(image, (w,h), interpolation=flags)
-        return image.clip(0, 255)
-
-    def final_resizing(self, image, sf):
-        h, w, c = image.shape
-        mode = random.choice(self.mode_list)
-
-        if mode == "nearest":
-            flags = cv2.INTER_NEAREST
-        elif mode == "bilinear":
-            flags = cv2.INTER_LINEAR
-        elif mode == "bicubic":
-            flags = cv2.INTER_CUBIC
-
-        image = cv2.resize(
-            image, (int(self.ori_w // sf), int(self.ori_h // sf)), interpolation=flags
-        )
+        image = cv2.resize(image, (w,h), interpolation=flags)
         return image.clip(0, 255)
 
     def generate_kernel1(self, image):
