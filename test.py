@@ -6,7 +6,7 @@ import numpy as np
 import PIL.Image as pil_image
 
 from models.models import Generator
-from utils import preprocess, get_concat_h
+from utils import preprocess
 
 
 if __name__ == "__main__":
@@ -50,7 +50,3 @@ if __name__ == "__main__":
     output = pil_image.fromarray(output)
     output.save(args.image_file.replace(".", "_Real_ESRGAN."))
 
-    if args.merge:
-        merge = get_concat_h(bicubic, output).save(
-            args.image_file.replace(".", "_hconcat_.")
-        )

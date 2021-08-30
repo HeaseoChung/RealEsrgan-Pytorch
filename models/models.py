@@ -3,6 +3,7 @@ from torch import nn as nn
 from torch.nn import functional as F
 from torch.nn import init as init
 from torch.nn.utils import spectral_norm
+from torch.cuda import amp
 
 @torch.no_grad()
 def default_init_weights(module_list, scale=1, bias_fill=0, **kwargs):
@@ -138,6 +139,7 @@ class Generator(nn.Module):
 
         self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
+    @amp.autocast()
     def forward(self, x):
         feat = self.conv_first(x)
         body_feat = self.conv_body(self.body(feat))

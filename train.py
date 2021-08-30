@@ -23,8 +23,9 @@ from utils import (
 )
 from dataset import Dataset
 
+# pid : 6323 python3 train.py --train-file /dataset/data/ --eval-file /dataset/test --outputs-dir weights --num-net-epochs 0 --num-gan-epochs 100000 --resume-g pretrained/RealESRGAN_x4plus.pth  --scale 2 --cuda 3 --patch-size 80
 
-def net_trainer(train_dataloader, eval_dataloader, model, pixel_criterion, net_optimizer, epoch, best_psnr, scaler, writer, args):
+def net_trainer(train_dataloader, eval_dataloader, model, pixel_criterion, net_optimizer, epoch, best_psnr, scaler, writer, device, args):
         model.train()
         losses = AverageMeter(name="PSNR Loss", fmt=":.6f")
         psnr = AverageMeter(name="PSNR", fmt=":.6f")
@@ -85,7 +86,7 @@ def net_trainer(train_dataloader, eval_dataloader, model, pixel_criterion, net_o
                 }, os.path.join(args.outputs_dir, 'epoch_{}.pth'.format(epoch))
             )
 
-def gan_trainer(train_dataloader, eval_dataloader, generator, discriminator, pixel_criterion, content_criterion, adversarial_criterion, generator_optimizer, discriminator_optimizer, epoch, best_ssim, scaler, writer, args):
+def gan_trainer(train_dataloader, eval_dataloader, generator, discriminator, pixel_criterion, content_criterion, adversarial_criterion, generator_optimizer, discriminator_optimizer, epoch, best_ssim, scaler, writer, device, args):
     generator.train()
     discriminator.train()
 
@@ -330,7 +331,7 @@ if __name__ == '__main__':
                                 )
     """NET Training"""
     for epoch in range(start_net_epoch, total_net_epoch):
-        net_trainer(train_dataloader=train_dataloader, eval_dataloader=eval_dataloader, model=generator, pixel_criterion=pixel_criterion, net_optimizer=net_optimizer, epoch=epoch, best_psnr=best_psnr, scaler=scaler, writer=writer, args=args)
+        net_trainer(train_dataloader=train_dataloader, eval_dataloader=eval_dataloader, model=generator, pixel_criterion=pixel_criterion, net_optimizer=net_optimizer, epoch=epoch, best_psnr=best_psnr, scaler=scaler, writer=writer, device=device, args=args)
         net_scheduler.step()
 
 
@@ -357,23 +358,22 @@ if __name__ == '__main__':
         """ resume generator """
         #checkpoint_g = torch.load(args.resume_g)['params_ema']
         
-        state_dict = generator.state_dict()
-        for n, p in torch.load(args.resume_g,map_location=device)['params_ema'].items():
-            if n in state_dict.keys():
-                state_dict[n].copy_(p)
-            else:
-                raise RuntimeError("Model error")
+        # state_dict = generator.state_dict()
+        # for n, p in torch.load(args.resume_g,map_location=device)['params_ema'].items():
+        #     if n in state_dict.keys():
+        #         state_dict[n].copy_(p)
+        #     else:
+        #         raise RuntimeError("Model error")
 
-
-        # generator.load_state_dict(checkpoint_g['model_state_dict'])
-        # g_epoch = checkpoint_g['epoch'] + 1
-        # generator_optimizer.load_state_dict(checkpoint_g['optimizer_state_dict'])
+        checkpoint_g = torch.load(args.resume_g)
+        generator.load_state_dict(checkpoint_g['model_state_dict'])
+        start_gan_epoch = checkpoint_g['epoch'] + 1
+        generator_optimizer.load_state_dict(checkpoint_g['optimizer_state_dict'])
 
     if os.path.exists(args.resume_d):
         """ resume discriminator """
         checkpoint_d = torch.load(args.resume_d)
         discriminator.load_state_dict(checkpoint_d['model_state_dict'])
-        d_epoch = checkpoint_g['epoch'] + 1
         discriminator_optimizer.load_state_dict(checkpoint_d['optimizer_state_dict'])
 
     """ RealESGAN 로그 인포 프린트 하기 """
@@ -394,6 +394,6 @@ if __name__ == '__main__':
 
     """GAN Training"""
     for epoch in range(start_gan_epoch, total_gan_epoch):
-        gan_trainer(train_dataloader=train_dataloader, eval_dataloader=eval_dataloader, generator=generator, discriminator=discriminator, pixel_criterion=pixel_criterion, content_criterion=content_criterion, adversarial_criterion=adversarial_criterion, generator_optimizer=generator_optimizer, discriminator_optimizer=discriminator_optimizer, epoch=epoch, best_ssim=best_ssim, scaler=scaler, writer=writer, args=args)
+        gan_trainer(train_dataloader=train_dataloader, eval_dataloader=eval_dataloader, generator=generator, discriminator=discriminator, pixel_criterion=pixel_criterion, content_criterion=content_criterion, adversarial_criterion=adversarial_criterion, generator_optimizer=generator_optimizer, discriminator_optimizer=discriminator_optimizer, epoch=epoch, best_ssim=best_ssim, scaler=scaler, writer=writer, device=device, args=args)
         discriminator_scheduler.step()
         generator_scheduler.step()
