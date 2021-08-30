@@ -9,10 +9,14 @@ from PIL import Image
 from scipy import special
 from scipy import ndimage
 from scipy.stats import multivariate_normal
+from scipy.linalg import orth
+
+import PIL.Image as pil_image
 
 
 class Degradation:
-    def __init__(self):
+    def __init__(self, sf=4):
+        self.sf = sf
         self.blur_kernel_size = 21
         self.kernel_list = [
             "iso",
@@ -28,7 +32,7 @@ class Degradation:
         self.betap_range = [1, 2]
         self.sinc_prob = 0.1
         self.updown_type = ["up", "down", "keep"]
-        self.mode_list = ["nearest", "bilinear", "bicubic"]
+        self.mode_list = ["area", "bilinear", "bicubic"]
         self.resize_prob = [0.2, 0.7, 0.1]
         self.resize_range = [0.15, 1.5]
 
@@ -60,67 +64,118 @@ class Degradation:
         ).float()  # convolving with pulse tensor brings no blurry effect
         self.pulse_tensor[10, 10] = 1
 
+    def uint2single(self, img):
+        return np.float32(img / 255.0)
+
+    def single2uint(self, img):
+        return np.uint8((img.clip(0, 1) * 255.0).round())
+
     def degradation_pipeline(self, image):
+        image = self.uint2single(np.array(image))
+        hq = image.copy()
+
         """Generate kernels (used in the first degradation)"""
-        self.ori_w, self.ori_h = image.size
         image = self.generate_kernel1(image)
         image = self.generate_sinc(image)
         image = self.random_resizing1(image)
-        image = self.random_poisson_noise(image)
-        image = self.random_gaussian_noise(image)
-        image = self.random_jpeg_noise(image)
+        image = self.add_Gaussian_noise(image)
+        image = self.add_Poisson_noise(image)
+        image = self.add_JPEG_noise(image)
 
         """ Generate kernels (used in the second degradation) """
         image = self.generate_kernel2(image)
         image = self.random_resizing2(image)
-        image = self.random_poisson_noise(image)
-        image = self.random_gaussian_noise(image)
+        image = self.add_Poisson_noise(image)
+        image = self.add_Gaussian_noise(image)
+
         if np.random.uniform() < 0.5:
             image = self.generate_sinc(image)
-            image = self.random_jpeg_noise(image)
+            image = self.add_JPEG_noise(image)
         else:
-            image = self.random_jpeg_noise(image)
+            image = self.add_JPEG_noise(image)
             image = self.generate_sinc(image)
-        return Image.fromarray(image.clip(0, 255).astype(np.uint8))
 
-    def random_poisson_noise(self, img, sigma_s="RAN", sigma_c="RAN"):
-        min_log = np.log([0.0001])
-        if sigma_s == "RAN":
-            sigma_s = min_log + np.random.rand(1) * (np.log([0.16]) - min_log)
-            sigma_s = np.exp(sigma_s)
-            self.sigma_s = sigma_s
-        if sigma_c == "RAN":
-            sigma_c = min_log + np.random.rand(1) * (np.log([0.06]) - min_log)
-            sigma_c = np.exp(sigma_c)
-            self.sigma_c = sigma_c
+        # resize to desired size
+        image = cv2.resize(
+            image,
+            (int(1 / self.sf * hq.shape[1]), int(1 / self.sf * hq.shape[0])),
+            interpolation=random.choice([1, 2, 3]),
+        )
 
-        sigma_total = np.sqrt(sigma_s * img + sigma_c)
+        image = self.single2uint(image)
+        return image
+
+    def add_Poisson_noise(self, img):
+        img = np.clip((img * 255.0).round(), 0, 255) / 255.0
+        vals = 10 ** (2 * random.random() + 2.0)  # [2, 4]
+        if random.random() < 0.5:
+            img = np.random.poisson(img * vals).astype(np.float32) / vals
+        else:
+            img_gray = np.dot(img[..., :3], [0.299, 0.587, 0.114])
+            img_gray = np.clip((img_gray * 255.0).round(), 0, 255) / 255.0
+            noise_gray = (
+                np.random.poisson(img_gray * vals).astype(np.float32) / vals - img_gray
+            )
+            img += noise_gray[:, :, np.newaxis]
+        img = np.clip(img, 0.0, 1.0)
+        return img
+
+    def add_Gaussian_noise(self, img, noise_level1=2, noise_level2=25):
+        noise_level = random.randint(noise_level1, noise_level2)
+        rnum = np.random.rand()
+        if rnum > 0.6:  # add color Gaussian noise
+            img += np.random.normal(0, noise_level / 255.0, img.shape).astype(
+                np.float32
+            )
+        elif rnum < 0.4:  # add grayscale Gaussian noise
+            img += np.random.normal(0, noise_level / 255.0, (*img.shape[:2], 1)).astype(
+                np.float32
+            )
+        else:  # add  noise
+            L = noise_level2 / 255.0
+            D = np.diag(np.random.rand(3))
+            U = orth(np.random.rand(3, 3))
+            conv = np.dot(np.dot(np.transpose(U), D), U)
+            img += np.random.multivariate_normal(
+                [0, 0, 0], np.abs(L ** 2 * conv), img.shape[:2]
+            ).astype(np.float32)
+        img = np.clip(img, 0.0, 1.0)
+        return img
+
+    def add_JPEG_noise(self, img):
+        quality_factor = random.randint(30, 95)
+        img = cv2.cvtColor(self.single2uint(img), cv2.COLOR_RGB2BGR)
+        result, encimg = cv2.imencode(
+            ".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), quality_factor]
+        )
+        img = cv2.imdecode(encimg, 1)
+        img = cv2.cvtColor(self.uint2single(img), cv2.COLOR_BGR2RGB)
+        return img
+
+    def add_sharpening(self, img, weight=0.5, radius=50, threshold=10):
+        """USM sharpening. borrowed from real-ESRGAN
+        Input image: I; Blurry image: B.
+        1. K = I + weight * (I - B)
+        2. Mask = 1 if abs(I - B) > threshold, else: 0
+        3. Blur mask:
+        4. Out = Mask * K + (1 - Mask) * I
+        Args:
+            img (Numpy array): Input image, HWC, BGR; float32, [0, 1].
+            weight (float): Sharp weight. Default: 1.
+            radius (float): Kernel size of Gaussian blur. Default: 50.
+            threshold (int):
         """
-        noisy_img = img + \
-            np.random.normal(0.0, 1.0, img.shape) * (sigma_s * img) + \
-            np.random.normal(0.0, 1.0, img.shape) * sigma_c
-        """
-        noisy_img = img + sigma_total * np.random.randn(img.shape[0], img.shape[1])
-        noisy_img = np.clip(noisy_img, 0, 255)
-        return noisy_img
+        if radius % 2 == 0:
+            radius += 1
+        blur = cv2.GaussianBlur(img, (radius, radius), 0)
+        residual = img - blur
+        mask = np.abs(residual) * 255 > threshold
+        mask = mask.astype("float32")
+        soft_mask = cv2.GaussianBlur(mask, (radius, radius), 0)
 
-    def random_gaussian_noise(self, image):
-        noise_level = random.randint(1, 25)
-        image = image + np.random.normal(0, noise_level, image.shape)
-        return image.clip(min=0, max=255)
-
-    def random_poisson_noise(self, image):
-        sampled_lambda = len(np.unique(image))
-        noise = (np.random.poisson(image) - image) * sampled_lambda / 100  # or 255?
-        image = image + noise
-        return image.clip(min=0, max=255)
-
-    def random_jpeg_noise(self, image):
-        qf = random.randint(30, 95)
-        trans = ia.JpegCompression(compression=qf)
-        degrade_function = lambda x: trans.augment_image(x)
-        image = degrade_function(image.astype(np.uint8))
-        return image.clip(min=0, max=255)
+        K = img + weight * residual
+        K = np.clip(K, 0, 1)
+        return soft_mask * K + (1 - soft_mask) * img
 
     def random_resizing1(self, image):
         h, w, c = image.shape
@@ -135,8 +190,8 @@ class Degradation:
         else:
             scale = 1
 
-        if mode == "nearest":
-            flags = cv2.INTER_NEAREST
+        if mode == "area":
+            flags = cv2.INTER_AREA
         elif mode == "bilinear":
             flags = cv2.INTER_LINEAR
         elif mode == "bicubic":
@@ -144,7 +199,8 @@ class Degradation:
 
         image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=flags)
         image = cv2.resize(image, (w, h), interpolation=flags)
-        return image.clip(0, 255)
+        image = np.clip(image, 0.0, 1.0)
+        return image
 
     def random_resizing2(self, image):
         h, w, c = image.shape
@@ -158,8 +214,8 @@ class Degradation:
         else:
             scale = 1
 
-        if mode == "nearest":
-            flags = cv2.INTER_NEAREST
+        if mode == "area":
+            flags = cv2.INTER_AREA
         elif mode == "bilinear":
             flags = cv2.INTER_LINEAR
         elif mode == "bicubic":
@@ -167,7 +223,8 @@ class Degradation:
 
         image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=flags)
         image = cv2.resize(image, (w, h), interpolation=flags)
-        return image.clip(0, 255)
+        image = np.clip(image, 0.0, 1.0)
+        return image
 
     def generate_kernel1(self, image):
         kernel_size = random.choice(self.kernel_range)
@@ -702,3 +759,15 @@ class Degradation:
             pad_size = (pad_to - kernel_size) // 2
             kernel = np.pad(kernel, ((pad_size, pad_size), (pad_size, pad_size)))
         return kernel
+
+
+if __name__ == "__main__":
+    deg = Degradation()
+
+    for i in range(10):
+        print(i)
+        img = pil_image.open("0801.png").convert("RGB")
+        sf = 4
+        img_lq = deg.degradation_pipeline(img)
+        img = pil_image.fromarray(img_lq)
+        img.save(f"{i}.png")

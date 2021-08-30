@@ -20,10 +20,6 @@ class Dataset(object):
             [
                 transforms.ToPILImage(),
                 transforms.Lambda(deg.degradation_pipeline),
-                transforms.Resize(
-                    (image_size // upscale_factor, image_size // upscale_factor),
-                    interpolation=Image.BICUBIC,
-                ),
                 transforms.ToTensor(),
             ]
         )
