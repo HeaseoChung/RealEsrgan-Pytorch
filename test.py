@@ -6,7 +6,7 @@ import numpy as np
 import PIL.Image as pil_image
 
 from models.models import Generator
-from utils import preprocess
+from utils import preprocess, get_concat_h
 
 
 if __name__ == "__main__":
@@ -14,11 +14,12 @@ if __name__ == "__main__":
     parser.add_argument("--weights-file", type=str, required=True)
     parser.add_argument("--image-file", type=str, required=True)
     parser.add_argument("--scale", type=int, required=True)
+    parser.add_argument("--gpu", type=int, default=3)
     parser.add_argument("--merge", action="store_true")
     args = parser.parse_args()
 
     cudnn.benchmark = True
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     model = Generator(args.scale).to(device)
     state_dict = model.state_dict()
 
@@ -50,3 +51,7 @@ if __name__ == "__main__":
     output = pil_image.fromarray(output)
     output.save(args.image_file.replace(".", "_Real_ESRGAN."))
 
+    if args.merge:
+        merge = get_concat_h(bicubic, output).save(
+            args.image_file.replace(".", "_hconcat_.")
+        )
