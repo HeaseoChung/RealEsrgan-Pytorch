@@ -5,6 +5,27 @@ from torch.nn import init as init
 from torch.nn.utils import spectral_norm
 from torch.cuda import amp
 
+import numpy as np
+
+
+def pixel_unshuffle(x, scale):
+    b, c, hh, hw = x.size()
+    out_channel = c * (scale ** 2)
+
+    p2d_h = (0, 0, 1, 0)
+    p2d_w = (1, 0, 0, 0)
+
+    if hh % 2 != 0:
+        x = F.pad(x, p2d_h, "reflect")
+    if hw % 2 != 0:
+        x = F.pad(x, p2d_w, "reflect")
+    h = x.shape[2] // scale
+    w = x.shape[3] // scale
+
+    x_view = x.view(b, c, h, scale, w, scale)
+    return x_view.permute(0, 1, 3, 5, 2, 4).reshape(b, out_channel, h, w)
+
+
 @torch.no_grad()
 def default_init_weights(module_list, scale=1, bias_fill=0, **kwargs):
     """Initialize network weights.
@@ -33,6 +54,7 @@ def default_init_weights(module_list, scale=1, bias_fill=0, **kwargs):
                 init.constant_(m.weight, 1)
                 if m.bias is not None:
                     m.bias.data.fill_(bias_fill)
+
 
 def make_layer(basic_block, num_basic_block, **kwarg):
     """Make layers by stacking the same blocks.
@@ -69,7 +91,9 @@ class ResidualDenseBlock(nn.Module):
         self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
         # initialization
-        default_init_weights([self.conv1, self.conv2, self.conv3, self.conv4, self.conv5], 0.1)
+        default_init_weights(
+            [self.conv1, self.conv2, self.conv3, self.conv4, self.conv5], 0.1
+        )
 
     def forward(self, x):
         x1 = self.lrelu(self.conv1(x))
@@ -125,11 +149,25 @@ class Generator(nn.Module):
         num_grow_ch (int): Channels for each growth. Default: 32.
     """
 
-    def __init__(self, scale=4, num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32):
+    def __init__(
+        self,
+        scale=4,
+        num_in_ch=3,
+        num_out_ch=3,
+        num_feat=64,
+        num_block=23,
+        num_grow_ch=32,
+    ):
         super(Generator, self).__init__()
         self.scale = scale
+        if scale == 2:
+            num_in_ch = num_in_ch * 4
+        elif scale == 1:
+            num_in_ch = num_in_ch * 16
         self.conv_first = nn.Conv2d(num_in_ch, num_feat, 3, 1, 1)
-        self.body = make_layer(RRDB, num_block, num_feat=num_feat, num_grow_ch=num_grow_ch)
+        self.body = make_layer(
+            RRDB, num_block, num_feat=num_feat, num_grow_ch=num_grow_ch
+        )
         self.conv_body = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
         # upsample
         self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
@@ -141,13 +179,20 @@ class Generator(nn.Module):
 
     @amp.autocast()
     def forward(self, x):
-        feat = self.conv_first(x)
+        if self.scale == 2:
+            feat = pixel_unshuffle(x, scale=2)
+        else:
+            feat = x
+        feat = self.conv_first(feat)
         body_feat = self.conv_body(self.body(feat))
         feat = feat + body_feat
-        
-        feat = self.lrelu(self.conv_up1(F.interpolate(feat, scale_factor=2, mode='nearest')))
-        if self.scale == 4:
-            feat = self.lrelu(self.conv_up2(F.interpolate(feat, scale_factor=2, mode='nearest')))
+        # upsample
+        feat = self.lrelu(
+            self.conv_up1(F.interpolate(feat, scale_factor=2, mode="nearest"))
+        )
+        feat = self.lrelu(
+            self.conv_up2(F.interpolate(feat, scale_factor=2, mode="nearest"))
+        )
         out = self.conv_last(self.lrelu(self.conv_hr(feat)))
         return out
 
@@ -183,17 +228,17 @@ class Discriminator(nn.Module):
         x3 = F.leaky_relu(self.conv3(x2), negative_slope=0.2, inplace=True)
 
         # upsample
-        x3 = F.interpolate(x3, scale_factor=2, mode='bilinear', align_corners=False)
+        x3 = F.interpolate(x3, scale_factor=2, mode="bilinear", align_corners=False)
         x4 = F.leaky_relu(self.conv4(x3), negative_slope=0.2, inplace=True)
 
         if self.skip_connection:
             x4 = x4 + x2
-        x4 = F.interpolate(x4, scale_factor=2, mode='bilinear', align_corners=False)
+        x4 = F.interpolate(x4, scale_factor=2, mode="bilinear", align_corners=False)
         x5 = F.leaky_relu(self.conv5(x4), negative_slope=0.2, inplace=True)
 
         if self.skip_connection:
             x5 = x5 + x1
-        x5 = F.interpolate(x5, scale_factor=2, mode='bilinear', align_corners=False)
+        x5 = F.interpolate(x5, scale_factor=2, mode="bilinear", align_corners=False)
         x6 = F.leaky_relu(self.conv6(x5), negative_slope=0.2, inplace=True)
 
         if self.skip_connection:
